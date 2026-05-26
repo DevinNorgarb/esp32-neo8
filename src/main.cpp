@@ -1,18 +1,34 @@
 #include <Arduino.h>
-#include <SoftwareSerial.h>
 #include <TinyGPSPlus.h>
 
+#if !defined(ESP32)
+#include <SoftwareSerial.h>
+#endif
+
 #ifndef GPS_RX_PIN
+#if defined(ESP32)
+#define GPS_RX_PIN 16
+#else
 #define GPS_RX_PIN 0
 #endif
+#endif
 #ifndef GPS_TX_PIN
+#if defined(ESP32)
+#define GPS_TX_PIN 17
+#else
 #define GPS_TX_PIN 2
+#endif
 #endif
 #ifndef GPS_BAUD
 #define GPS_BAUD 9600
 #endif
 
+#if defined(ESP32)
+// On ESP32 we use the built-in UART (Serial2) so we don't need SoftwareSerial.
+HardwareSerial& gpsSerial = Serial2;
+#else
 SoftwareSerial gpsSerial(GPS_RX_PIN, GPS_TX_PIN);
+#endif
 TinyGPSPlus gps;
 
 namespace {
@@ -73,7 +89,13 @@ void setup() {
   Serial.begin(115200);
   delay(100);
 
+  // ESP8266: SoftwareSerial.begin(baud)
+  // ESP32: HardwareSerial.begin(baud, config, rxPin, txPin)
+#if defined(ESP32)
+  gpsSerial.begin(GPS_BAUD, SERIAL_8N1, GPS_RX_PIN, GPS_TX_PIN);
+#else
   gpsSerial.begin(GPS_BAUD);
+#endif
   gpsSerial.setTimeout(0);
 
   Serial.println();
