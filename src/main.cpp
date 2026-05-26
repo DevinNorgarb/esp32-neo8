@@ -23,7 +23,7 @@
 #define GPS_BAUD 9600
 #endif
 #if defined(ESP32) && !defined(GPS_NAV_HZ)
-#define GPS_NAV_HZ 5
+#define GPS_NAV_HZ 10
 #elif !defined(GPS_NAV_HZ)
 #define GPS_NAV_HZ 1
 #endif
