@@ -22,10 +22,17 @@
 #ifndef GPS_BAUD
 #define GPS_BAUD 9600
 #endif
+#ifndef GPS_FEED_MS
+#define GPS_FEED_MS 100
+#endif
 
 #if defined(ESP32)
-// On ESP32 we use the built-in UART (Serial2) so we don't need SoftwareSerial.
+// ESP32-C3 has UART0 + UART1 only (Serial / Serial1). Other ESP32 targets use Serial2.
+#if CONFIG_IDF_TARGET_ESP32C3 || CONFIG_IDF_TARGET_ESP32H2
+HardwareSerial& gpsSerial = Serial1;
+#else
 HardwareSerial& gpsSerial = Serial2;
+#endif
 #else
 SoftwareSerial gpsSerial(GPS_RX_PIN, GPS_TX_PIN);
 #endif
@@ -111,7 +118,7 @@ void setup() {
 }
 
 void loop() {
-  feedGps(1000);
+  feedGps(GPS_FEED_MS);
 
   if (gps.location.isUpdated()) {
     printFix();

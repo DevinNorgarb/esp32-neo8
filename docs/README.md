@@ -13,3 +13,4 @@ Each file documents one PlatformIO `env:` target in `platformio.ini`, with:
 - `esp32_doit_devkit_v1`: `docs/esp32_doit_devkit_v1.md`
 - `nodemcu_32s`: `docs/nodemcu_32s.md`
 - `nodemcu_esp32_s3`: `docs/nodemcu_esp32_s3.md`
+- `esp32_c3_supermini`: `docs/esp32_c3_supermini.md`
