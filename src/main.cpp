@@ -22,8 +22,13 @@
 #ifndef GPS_BAUD
 #define GPS_BAUD 9600
 #endif
-#ifndef GPS_FEED_MS
-#define GPS_FEED_MS 100
+#if defined(ESP32) && !defined(GPS_NAV_HZ)
+#define GPS_NAV_HZ 5
+#elif !defined(GPS_NAV_HZ)
+#define GPS_NAV_HZ 1
+#endif
+#ifndef GPS_STATUS_MS
+#define GPS_STATUS_MS 1000
 #endif
 
 #if defined(ESP32)
@@ -39,6 +44,90 @@ SoftwareSerial gpsSerial(GPS_RX_PIN, GPS_TX_PIN);
 TinyGPSPlus gps;
 
 namespace {
+
+void beginGpsSerial(uint32_t baud) {
+#if defined(ESP32)
+  gpsSerial.begin(baud, SERIAL_8N1, GPS_RX_PIN, GPS_TX_PIN);
+#else
+  (void)baud;
+  gpsSerial.begin(baud);
+#endif
+  gpsSerial.setTimeout(0);
+}
+
+void flushGpsRx() {
+  while (gpsSerial.available() > 0) {
+    gpsSerial.read();
+  }
+}
+
+void sendUbx(uint8_t msgClass, uint8_t msgId, const uint8_t* payload, uint16_t len) {
+  uint8_t ckA = 0;
+  uint8_t ckB = 0;
+  auto checksum = [&](uint8_t b) {
+    ckA = static_cast<uint8_t>(ckA + b);
+    ckB = static_cast<uint8_t>(ckB + ckA);
+  };
+
+  gpsSerial.write(0xB5);
+  gpsSerial.write(0x62);
+  gpsSerial.write(msgClass);
+  checksum(msgClass);
+  gpsSerial.write(msgId);
+  checksum(msgId);
+  gpsSerial.write(static_cast<uint8_t>(len & 0xFF));
+  checksum(static_cast<uint8_t>(len & 0xFF));
+  gpsSerial.write(static_cast<uint8_t>(len >> 8));
+  checksum(static_cast<uint8_t>(len >> 8));
+  for (uint16_t i = 0; i < len; ++i) {
+    gpsSerial.write(payload[i]);
+    checksum(payload[i]);
+  }
+  gpsSerial.write(ckA);
+  gpsSerial.write(ckB);
+  gpsSerial.flush();
+}
+
+// Raise measurement rate only — do not change UART baud (breaks RX if CFG-PRT fails).
+void configureGpsNavRate() {
+  const uint16_t measMs = static_cast<uint16_t>(1000 / GPS_NAV_HZ);
+  const uint8_t rate[] = {
+      static_cast<uint8_t>(measMs & 0xFF),
+      static_cast<uint8_t>(measMs >> 8),
+      0x01,
+      0x00,
+      0x00,
+      0x00,
+  };
+  sendUbx(0x06, 0x08, rate, sizeof(rate));
+}
+
+bool listenForNmea(uint32_t baud, unsigned long listenMs) {
+  beginGpsSerial(baud);
+  flushGpsRx();
+
+  TinyGPSPlus probe;
+  const unsigned long start = millis();
+  while (millis() - start < listenMs) {
+    while (gpsSerial.available() > 0) {
+      if (probe.encode(gpsSerial.read()) && probe.passedChecksum() > 0) {
+        return true;
+      }
+    }
+    yield();
+  }
+  return false;
+}
+
+uint32_t detectGpsBaud() {
+  const uint32_t candidates[] = {GPS_BAUD, 9600, 38400, 115200};
+  for (uint32_t baud : candidates) {
+    if (listenForNmea(baud, 800)) {
+      return baud;
+    }
+  }
+  return GPS_BAUD;
+}
 
 void printFix() {
   Serial.print(F("Lat: "));
@@ -80,13 +169,22 @@ void printFix() {
   Serial.println(F("---"));
 }
 
-void feedGps(unsigned long timeoutMs) {
-  const unsigned long start = millis();
-  while (millis() - start < timeoutMs) {
-    while (gpsSerial.available() > 0) {
-      gps.encode(gpsSerial.read());
-    }
-    yield();
+void drainGps() {
+  while (gpsSerial.available() > 0) {
+    gps.encode(gpsSerial.read());
+  }
+}
+
+void printNoFixStatus() {
+  Serial.print(F("No fix yet. Chars: "));
+  Serial.print(gps.charsProcessed());
+  Serial.print(F("  Sentences: "));
+  Serial.print(gps.passedChecksum());
+  Serial.print(F("  Failed: "));
+  Serial.println(gps.failedChecksum());
+
+  if (gps.passedChecksum() == 0) {
+    Serial.println(F("No NMEA parsed — check GPS TX -> ESP RX and baud (9600)."));
   }
 }
 
@@ -96,38 +194,47 @@ void setup() {
   Serial.begin(115200);
   delay(100);
 
-  // ESP8266: SoftwareSerial.begin(baud)
-  // ESP32: HardwareSerial.begin(baud, config, rxPin, txPin)
-#if defined(ESP32)
-  gpsSerial.begin(GPS_BAUD, SERIAL_8N1, GPS_RX_PIN, GPS_TX_PIN);
-#else
-  gpsSerial.begin(GPS_BAUD);
-#endif
-  gpsSerial.setTimeout(0);
-
   Serial.println();
   Serial.println(F("ESP-01 + u-blox NEO-8 GPS"));
   Serial.print(F("GPS UART: RX=GPIO"));
   Serial.print(GPS_RX_PIN);
   Serial.print(F(" TX=GPIO"));
-  Serial.print(GPS_TX_PIN);
-  Serial.print(F(" @ "));
-  Serial.print(GPS_BAUD);
-  Serial.println(F(" baud"));
+  Serial.println(GPS_TX_PIN);
+
+  const uint32_t uartBaud = detectGpsBaud();
+  beginGpsSerial(uartBaud);
+  flushGpsRx();
+
+  if (listenForNmea(uartBaud, 500)) {
+    Serial.print(F("NMEA OK @ "));
+    Serial.print(uartBaud);
+    Serial.println(F(" baud"));
+#if GPS_NAV_HZ > 1
+    configureGpsNavRate();
+    delay(200);
+    flushGpsRx();
+#endif
+  } else {
+    Serial.println(F("WARNING: No NMEA — GPS TX must reach ESP RX (GPIO4 on C3)."));
+  }
+
+  Serial.print(F("Navigation rate target: "));
+  Serial.print(GPS_NAV_HZ);
+  Serial.println(F(" Hz"));
   Serial.println(F("Waiting for satellite fix (outdoors / near window)..."));
 }
 
 void loop() {
-  feedGps(GPS_FEED_MS);
+  drainGps();
 
   if (gps.location.isUpdated()) {
     printFix();
   } else if (!gps.location.isValid()) {
-    Serial.print(F("No fix yet. Chars: "));
-    Serial.print(gps.charsProcessed());
-    Serial.print(F("  Sentences: "));
-    Serial.print(gps.passedChecksum());
-    Serial.print(F("  Failed: "));
-    Serial.println(gps.failedChecksum());
+    static unsigned long lastStatusMs = 0;
+    const unsigned long now = millis();
+    if (now - lastStatusMs >= GPS_STATUS_MS) {
+      lastStatusMs = now;
+      printNoFixStatus();
+    }
   }
 }
